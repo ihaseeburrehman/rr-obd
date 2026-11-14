@@ -42,6 +42,7 @@
     <div class="row">
       <button id="btnConnect">Connect</button>
       <button id="btnDisconnect" class="sec" disabled>Disconnect</button>
+      <button id="btnAll" class="sec">Show all devices</button>
       <span id="status" class="status">Not connected</span>
     </div>
     <div id="noBle" class="warn" hidden>This browser has no Web Bluetooth. Use Chrome/Edge on Mac, Windows or Android, or the Bluefy browser on iPhone.</div>
@@ -103,13 +104,20 @@ function log(s){ const el=$('log'); el.textContent += s + '\n'; el.scrollTop = e
 function setStatus(s){ $('status').textContent = s; }
 function setConnected(on){
   ['btnLive','btnDtc','btnSend','btnDisconnect'].forEach(id => $(id).disabled = !on);
-  $('btnConnect').disabled = on;
+  $('btnConnect').disabled = on; $('btnAll').disabled = on;
   if(!on){ $('auto').checked = false; stopAuto(); }
 }
 
 async function connect(){
   setStatus('Opening device picker…'); log('Requesting device…');
-  device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: CANDIDATES });
+  const showAll = window.__showAll; window.__showAll = false;
+  const filters = [
+    ...['vLinker','VLINK','vLink','IOS-Vlink','MC-IOS','OBD','OBDII','V-LINK'].map(p => ({ namePrefix: p })),
+    ...CANDIDATES.map(u => ({ services: [u] })),
+  ];
+  device = await navigator.bluetooth.requestDevice(showAll
+    ? { acceptAllDevices: true, optionalServices: CANDIDATES }
+    : { filters, optionalServices: CANDIDATES });
   log('Picked: ' + (device.name || device.id));
   device.addEventListener('gattserverdisconnected', () => { setStatus('Disconnected'); setConnected(false); });
   setStatus('Connecting to ' + (device.name || 'adapter') + '…');
@@ -275,6 +283,7 @@ window.addEventListener('error', e => log('! ' + e.message));
 window.addEventListener('unhandledrejection', e => log('! ' + (e.reason && e.reason.message || e.reason)));
 log('Ready · Web Bluetooth ' + (navigator.bluetooth ? 'available' : 'NOT available') + ' · ' + navigator.userAgent.split(') ').pop());
 $('btnConnect').onclick = guard(connect);
+$('btnAll').onclick = () => { window.__showAll = true; guard(connect)(); };
 $('btnDisconnect').onclick = () => { stopAuto(); if (device && device.gatt.connected) device.gatt.disconnect(); };
 $('btnLive').onclick = guard(readLive);
 $('btnDtc').onclick = guard(readDtcs);
