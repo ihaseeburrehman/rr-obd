@@ -90,8 +90,10 @@
 <script>
 // ---------- BLE transport ----------
 const CANDIDATES = [
-  'e7810a71-73ae-499d-8c15-faa9aef0c3f2', // vLinker / IOS-Vlink
-  0xfff0, 0xffe0, 0x18f0,                 // common ELM327 BLE services
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2',  // vLinker / IOS-Vlink
+  '0000fff0-0000-1000-8000-00805f9b34fb',  // common ELM327 BLE services
+  '0000ffe0-0000-1000-8000-00805f9b34fb',
+  '000018f0-0000-1000-8000-00805f9b34fb',
 ];
 let device, rxChar, txChar, rxBuf = '', waiter = null, busy = Promise.resolve();
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -106,7 +108,9 @@ function setConnected(on){
 }
 
 async function connect(){
+  setStatus('Opening device picker…'); log('Requesting device…');
   device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: CANDIDATES });
+  log('Picked: ' + (device.name || device.id));
   device.addEventListener('gattserverdisconnected', () => { setStatus('Disconnected'); setConnected(false); });
   setStatus('Connecting to ' + (device.name || 'adapter') + '…');
   const server = await device.gatt.connect();
@@ -266,7 +270,10 @@ async function custom(){
 
 // ---------- wiring ----------
 if (!navigator.bluetooth){ $('noBle').hidden = false; $('btnConnect').disabled = true; }
-const guard = fn => async () => { try { await fn(); } catch(e){ log('! ' + e.message); setStatus(e.message); } };
+const guard = fn => async () => { try { await fn(); } catch(e){ const m = (e && (e.name ? e.name + ': ' : '') + (e.message || e)) || 'Unknown error'; log('! ' + m); setStatus('Error — ' + m); } };
+window.addEventListener('error', e => log('! ' + e.message));
+window.addEventListener('unhandledrejection', e => log('! ' + (e.reason && e.reason.message || e.reason)));
+log('Ready · Web Bluetooth ' + (navigator.bluetooth ? 'available' : 'NOT available') + ' · ' + navigator.userAgent.split(') ').pop());
 $('btnConnect').onclick = guard(connect);
 $('btnDisconnect').onclick = () => { stopAuto(); if (device && device.gatt.connected) device.gatt.disconnect(); };
 $('btnLive').onclick = guard(readLive);
