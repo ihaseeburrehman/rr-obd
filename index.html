@@ -158,7 +158,9 @@ function send(cmd, timeout = 5000){
       setTimeout(() => { if (waiter === res){ waiter = null; rej(new Error('Timeout: ' + cmd)); } }, timeout);
     });
     await rawWrite(cmd + '\r');
-    const raw = await p;
+    let raw;
+    try { raw = await p; }
+    catch (e) { await new Promise(r => setTimeout(r, 400)); rxBuf = ''; waiter = null; throw e; } // drop late replies
     const out = raw.replace(/>/g,'').replace(/\r+/g,'\n').split('\n').map(s => s.trim()).filter(Boolean).join('\n');
     log('> ' + cmd + '\n' + out);
     return out;
@@ -215,16 +217,28 @@ const PIDS = [
 
 function tile(k, v){ return `<div class="m"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
 
+// Ask, and accept the reply only if it answers this exact question (retry once)
+async function query(cmd, prefix){
+  for (let t = 0; t < 2; t++){
+    try { const b = bytesAfter(await send(cmd), prefix); if (b && b.length) return b; } catch {}
+  }
+  return null;
+}
+
+let liveBusy = false;
 async function readLive(){
+  if (liveBusy) return; liveBusy = true;
+  try { await readLiveInner(); } finally { liveBusy = false; }
+}
+async function readLiveInner(){
   await setHeader('7E0');
   let html = '';
   for (const [pid, name, fn] of PIDS){
-    try { const b = bytesAfter(await send('01' + pid), '41' + pid); html += tile(name, b && b.length ? fn(b) : 'n/a'); }
-    catch { html += tile(name, 'n/a'); }
+    const b = await query('01' + pid, '41' + pid); html += tile(name, b ? fn(b) : 'n/a');
   }
   // PID 8B: diesel aftertreatment (DPF regen status, trigger %, averages)
-  try {
-    const b = bytesAfter(await send('018B'), '418B');
+  {
+    const b = await query('018B', '418B');
     if (b && b.length >= 7){
       const inRegen = b[1] & 1, active = (b[1] >> 1) & 1;
       html += tile('DPF regen', inRegen ? (active ? 'Active' : 'Passive') : 'None');
@@ -232,7 +246,7 @@ async function readLive(){
       html += tile('Avg time between regens', (b[3]*256 + b[4]) + ' min');
       html += tile('Avg distance between regens', (b[5]*256 + b[6]) + ' km');
     } else html += tile('DPF data', 'n/a');
-  } catch { html += tile('DPF data', 'n/a'); }
+  }
   $('live').innerHTML = html;
 }
 
