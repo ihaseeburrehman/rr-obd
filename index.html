@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RR OBD</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--fg:#14171a;--muted:#65707b;--line:#e3e6ea;--accent:#1f6feb;--ok:#1a7f37;--warn:#b35900;--bad:#cf222e}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--accent:#4493f8;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  main{max-width:640px;margin:0 auto;padding:16px}
+  h1{font-size:20px;margin:4px 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  .card h2{font-size:15px;margin:0 0 10px}
+  button{font:inherit;border:0;border-radius:8px;padding:9px 14px;background:var(--accent);color:#fff;cursor:pointer}
+  button.sec{background:transparent;color:var(--accent);border:1px solid var(--line)}
+  button:disabled{opacity:.45;cursor:default}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .status{font-size:13px;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .m{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  .m .k{font-size:12px;color:var(--muted)}
+  .m .v{font-size:18px;font-weight:600}
+  .dtc{border-bottom:1px solid var(--line);padding:6px 0;font-size:14px}
+  .dtc:last-child{border:0}
+  .tag{font-size:11px;padding:1px 6px;border-radius:6px;border:1px solid var(--line);margin-left:6px;color:var(--muted)}
+  .tag.bad{color:var(--bad);border-color:var(--bad)}
+  input{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);min-width:0}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;max-height:220px;overflow:auto;white-space:pre-wrap;margin:8px 0 0}
+  .warn{color:var(--warn);font-size:13px}
+  label{font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>RR OBD</h1>
+  <div class="sub">Read-only diagnostics for Range Rover Sport L494 3.0 diesel · vLinker MC+ (BLE)</div>
+
+  <div class="card">
+    <div class="row">
+      <button id="btnConnect">Connect</button>
+      <button id="btnDisconnect" class="sec" disabled>Disconnect</button>
+      <span id="status" class="status">Not connected</span>
+    </div>
+    <div id="noBle" class="warn" hidden>This browser has no Web Bluetooth. Use Chrome/Edge on Mac, Windows or Android, or the Bluefy browser on iPhone.</div>
+    <div class="status" style="margin-top:6px">Close Car Scanner first — the adapter accepts one connection at a time.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Live data</h2>
+      <div class="row">
+        <label><input type="checkbox" id="auto"> Auto (3 s)</label>
+        <button id="btnLive" class="sec" disabled>Read</button>
+      </div>
+    </div>
+    <div class="grid" id="live" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Faults (real ones only)</h2>
+      <button id="btnDtc" class="sec" disabled>Scan</button>
+    </div>
+    <div class="status" style="margin:6px 0">Shows only codes the car marks as failed or confirmed — no "test not completed" noise.</div>
+    <div id="dtc"></div>
+  </div>
+
+  <div class="card">
+    <h2>Custom read request</h2>
+    <div class="row">
+      <input id="hdr" value="7E0" size="5" aria-label="Header">
+      <input id="cmd" placeholder="e.g. 22F190" style="flex:1" aria-label="Command">
+      <button id="btnSend" class="sec" disabled>Send</button>
+    </div>
+    <div class="status" style="margin-top:6px">Read-only: only AT, 01–0A, 19 and 22 requests are allowed. Use it to find the soot-in-grams code.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Log</h2>
+      <button id="btnClear" class="sec">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </div>
+</main>
+
+<script>
+// ---------- BLE transport ----------
+const CANDIDATES = [
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2', // vLinker / IOS-Vlink
+  0xfff0, 0xffe0, 0x18f0,                 // common ELM327 BLE services
+];
+let device, rxChar, txChar, rxBuf = '', waiter = null, busy = Promise.resolve();
+const enc = new TextEncoder(), dec = new TextDecoder();
+const $ = id => document.getElementById(id);
+
+function log(s){ const el=$('log'); el.textContent += s + '\n'; el.scrollTop = el.scrollHeight; }
+function setStatus(s){ $('status').textContent = s; }
+function setConnected(on){
+  ['btnLive','btnDtc','btnSend','btnDisconnect'].forEach(id => $(id).disabled = !on);
+  $('btnConnect').disabled = on;
+  if(!on){ $('auto').checked = false; stopAuto(); }
+}
+
+async function connect(){
+  device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: CANDIDATES });
+  device.addEventListener('gattserverdisconnected', () => { setStatus('Disconnected'); setConnected(false); });
+  setStatus('Connecting to ' + (device.name || 'adapter') + '…');
+  const server = await device.gatt.connect();
+  for (const uuid of CANDIDATES){
+    let svc; try { svc = await server.getPrimaryService(uuid); } catch { continue; }
+    const chars = await svc.getCharacteristics();
+    rxChar = chars.find(c => c.properties.notify || c.properties.indicate);
+    txChar = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
+    if (rxChar && txChar) { log('Service ' + svc.uuid); break; }
+  }
+  if (!rxChar || !txChar) throw new Error('No ELM327 service found on this device');
+  rxChar.addEventListener('characteristicvaluechanged', e => {
+    rxBuf += dec.decode(e.target.value);
+    if (waiter && rxBuf.includes('>')) { const r = rxBuf; rxBuf = ''; const w = waiter; waiter = null; w(r); }
+  });
+  await rxChar.startNotifications();
+  await initElm();
+  setStatus('Connected · ' + (device.name || 'adapter'));
+  setConnected(true);
+}
+
+async function rawWrite(text){
+  const data = enc.encode(text);
+  for (let i = 0; i < data.length; i += 20){
+    const chunk = data.slice(i, i + 20);
+    if (txChar.properties.writeWithoutResponse) await txChar.writeValueWithoutResponse(chunk);
+    else await txChar.writeValue(chunk);
+  }
+}
+
+// Serialised send: one command at a time, resolves on ELM '>' prompt
+function send(cmd, timeout = 5000){
+  const run = async () => {
+    rxBuf = '';
+    const p = new Promise((res, rej) => {
+      waiter = res;
+      setTimeout(() => { if (waiter === res){ waiter = null; rej(new Error('Timeout: ' + cmd)); } }, timeout);
+    });
+    await rawWrite(cmd + '\r');
+    const raw = await p;
+    const out = raw.replace(/>/g,'').replace(/\r+/g,'\n').split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+    log('> ' + cmd + '\n' + out);
+    return out;
+  };
+  const next = busy.then(run, run);
+  busy = next.catch(() => {});
+  return next;
+}
+
+let currentHeader = '';
+async function setHeader(h){
+  if (h === currentHeader) return;
+  await send('ATSH' + h);
+  // receive filter = request header + 8 (e.g. 7E0 -> 7E8)
+  const rx = (parseInt(h, 16) + 8).toString(16).toUpperCase();
+  await send('ATCRA' + rx);
+  currentHeader = h;
+}
+
+async function initElm(){
+  currentHeader = '';
+  await send('ATZ', 8000);
+  for (const c of ['ATE0','ATL0','ATS0','ATH0','ATAT1','ATSP6','ATCAF1']) await send(c);
+  await setHeader('7E0');
+}
+
+// ---------- helpers ----------
+function hexBytes(resp){
+  // drop ISO-TP line indexes like "0:" and the length line, keep hex only
+  const lines = resp.split('\n').filter(l => !/^[0-9A-F]{3}$/i.test(l));
+  return lines.map(l => l.replace(/^[0-9A-F]:/i,'')).join('').replace(/[^0-9A-F]/gi,'').toUpperCase();
+}
+function bytesAfter(resp, prefix){
+  const hex = hexBytes(resp); const i = hex.indexOf(prefix);
+  if (i < 0) return null;
+  const rest = hex.slice(i + prefix.length); const out = [];
+  for (let j = 0; j + 1 < rest.length; j += 2) out.push(parseInt(rest.substr(j, 2), 16));
+  return out;
+}
+function dtcName(b1, b2){
+  const letter = 'PCBU'[b1 >> 6];
+  return letter + ((b1 >> 4) & 3) + (b1 & 15).toString(16).toUpperCase() + b2.toString(16).toUpperCase().padStart(2,'0');
+}
+
+// ---------- live data (standard OBD PIDs) ----------
+const PIDS = [
+  ['0C','Engine RPM', b => ((b[0]*256 + b[1]) / 4).toFixed(0) + ' rpm'],
+  ['05','Coolant', b => (b[0] - 40) + ' °C'],
+  ['2F','Fuel level', b => (b[0] * 100 / 255).toFixed(0) + ' %'],
+  ['1F','Run time', b => { const s = b[0]*256 + b[1]; return Math.floor(s/60) + ' min ' + (s%60) + ' s'; }],
+  ['21','Distance with MIL on', b => (b[0]*256 + b[1]) + ' km'],
+  ['31','Distance since codes cleared', b => (b[0]*256 + b[1]) + ' km'],
+];
+
+function tile(k, v){ return `<div class="m"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+
+async function readLive(){
+  await setHeader('7E0');
+  let html = '';
+  for (const [pid, name, fn] of PIDS){
+    try { const b = bytesAfter(await send('01' + pid), '41' + pid); html += tile(name, b && b.length ? fn(b) : 'n/a'); }
+    catch { html += tile(name, 'n/a'); }
+  }
+  // PID 8B: diesel aftertreatment (DPF regen status, trigger %, averages)
+  try {
+    const b = bytesAfter(await send('018B'), '418B');
+    if (b && b.length >= 7){
+      const inRegen = b[1] & 1, active = (b[1] >> 1) & 1;
+      html += tile('DPF regen', inRegen ? (active ? 'Active' : 'Passive') : 'None');
+      html += tile('Soot trigger', (b[2] * 100 / 255).toFixed(0) + ' %');
+      html += tile('Avg time between regens', (b[3]*256 + b[4]) + ' min');
+      html += tile('Avg distance between regens', (b[5]*256 + b[6]) + ' km');
+    } else html += tile('DPF data', 'n/a');
+  } catch { html += tile('DPF data', 'n/a'); }
+  $('live').innerHTML = html;
+}
+
+let autoTimer = null;
+function stopAuto(){ clearInterval(autoTimer); autoTimer = null; }
+
+// ---------- faults: UDS 19 02 09 = only failed (bit0) or confirmed (bit3) ----------
+const MODULES = [['7E0','Engine (ECM)'], ['7E1','Gearbox (TCM)']];
+
+async function readDtcs(){
+  const out = [];
+  for (const [h, name] of MODULES){
+    try {
+      await setHeader(h);
+      const b = bytesAfter(await send('190209', 8000), '5902');
+      if (!b){ out.push(`<div class="dtc"><b>${name}</b><span class="tag">no reply</span></div>`); continue; }
+      const recs = [];
+      for (let i = 1; i + 3 < b.length; i += 4){
+        const st = b[i+3];
+        if (!(st & 0x09)) continue;
+        const code = dtcName(b[i], b[i+1]) + '-' + b[i+2].toString(16).toUpperCase().padStart(2,'0');
+        const tags = [];
+        if (st & 0x01) tags.push('<span class="tag bad">active</span>');
+        if (st & 0x08) tags.push('<span class="tag">confirmed</span>');
+        recs.push(`<div class="dtc">${code}${tags.join('')}</div>`);
+      }
+      out.push(`<div class="dtc"><b>${name}</b>${recs.length ? '' : '<span class="tag">no faults</span>'}</div>` + recs.join(''));
+    } catch(e){ out.push(`<div class="dtc"><b>${name}</b><span class="tag">${e.message}</span></div>`); }
+  }
+  await setHeader('7E0');
+  $('dtc').innerHTML = out.join('');
+}
+
+// ---------- custom read-only request ----------
+const ALLOWED = /^(AT(?!PP|WS|MA)|0[1-9A]|19|22)/i;
+async function custom(){
+  const h = $('hdr').value.trim().toUpperCase(), c = $('cmd').value.trim().replace(/\s+/g,'').toUpperCase();
+  if (!/^[0-9A-F]{3}$/.test(h)) return log('! Header must be 3 hex digits, e.g. 7E0');
+  if (!ALLOWED.test(c)) return log('! Blocked: only read requests (AT, 01–0A, 19, 22) are allowed');
+  if (!c.startsWith('AT')) await setHeader(h);
+  await send(c, 8000);
+}
+
+// ---------- wiring ----------
+if (!navigator.bluetooth){ $('noBle').hidden = false; $('btnConnect').disabled = true; }
+const guard = fn => async () => { try { await fn(); } catch(e){ log('! ' + e.message); setStatus(e.message); } };
+$('btnConnect').onclick = guard(connect);
+$('btnDisconnect').onclick = () => { stopAuto(); if (device && device.gatt.connected) device.gatt.disconnect(); };
+$('btnLive').onclick = guard(readLive);
+$('btnDtc').onclick = guard(readDtcs);
+$('btnSend').onclick = guard(custom);
+$('btnClear').onclick = () => $('log').textContent = '';
+$('auto').onchange = e => {
+  stopAuto();
+  if (e.target.checked){ guard(readLive)(); autoTimer = setInterval(guard(readLive), 3000); }
+};
+</script>
+</body>
+</html>
