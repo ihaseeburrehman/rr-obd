@@ -233,6 +233,10 @@ const PIDS = [
   ['31','Distance since codes cleared', b => (b[0]*256 + b[1]) + ' km'],
 ];
 
+// Soot mass at which this car triggers a regen (100 %): Car Scanner showed
+// 14.04 g at 58 % and 7.53 g at 31 %, both ≈ 24.3 g.
+const SOOT_FULL_G = 24.3;
+
 function tile(k, v){ return `<div class="m"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
 
 // Ask, and accept the reply only if it answers this exact question (retry once)
@@ -260,7 +264,9 @@ async function readLiveInner(){
     if (b && b.length >= 7){
       const inRegen = b[1] & 1, active = (b[1] >> 1) & 1;
       html += tile('DPF regen', inRegen ? (active ? 'Active' : 'Passive') : 'None');
-      html += tile('Soot trigger', (b[2] * 100 / 255).toFixed(0) + ' %');
+      const trig = b[2] * 100 / 255;
+      html += tile('Soot (est.)', (trig * SOOT_FULL_G / 100).toFixed(1) + ' g');
+      html += tile('Soot trigger', trig.toFixed(0) + ' %');
       html += tile('Avg time between regens', (b[3]*256 + b[4]) + ' min');
       html += tile('Avg distance between regens', (b[5]*256 + b[6]) + ' km');
     } else html += tile('DPF data', 'n/a');
